@@ -1020,6 +1020,21 @@
     cursor: pointer; transition: all 0.25s;
   }
   .adm-card-edit:hover { background: var(--moss); color: var(--cream); }
+  .adm-card-del {
+    background: none; border: 1px solid #c0392b; color: #c0392b;
+    padding: 6px 12px; font-family: 'Nunito', sans-serif;
+    font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase;
+    cursor: pointer; transition: all 0.25s; margin-left: 8px;
+  }
+  .adm-card-del:hover { background: #c0392b; color: var(--cream); }
+  .adm-project-card.hidden-proj { opacity: 0.6; border-style: dashed; }
+  .adm-add-project {
+    background: none; border: 1.5px dashed var(--moss); color: var(--moss);
+    padding: 14px 20px; width: 100%; font-family: 'Nunito', sans-serif;
+    font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase;
+    cursor: pointer; transition: all 0.25s;
+  }
+  .adm-add-project:hover { background: var(--moss); color: var(--cream); }
 
   /* Project editor modal */
   #adm-project-editor {
@@ -1744,6 +1759,8 @@
       <div class="adm-projects-grid" id="adm-projects-grid">
         <!-- filled by JS -->
       </div>
+      <button class="adm-add-project" onclick="addProject()">+ Agregar proyecto</button>
+      <span class="adm-saved" id="adm-proj-list-saved">¡Guardado ✓</span>
     </div>
 
 
@@ -1874,7 +1891,11 @@
     </div>
 
     <label class="adm-toggle-coming">
-      <input type="checkbox" id="adm-proj-coming"/> Marcar como "Próximamente" (oculto en el portfolio)
+      <input type="checkbox" id="adm-proj-coming"/> Marcar como "Próximamente" (muestra tarjeta de aviso)
+    </label>
+
+    <label class="adm-toggle-coming">
+      <input type="checkbox" id="adm-proj-hidden"/> Ocultar del sitio (no aparece en el portfolio hasta que lo actives)
     </label>
 
     <div style="margin-top:28px; margin-bottom:8px;">
@@ -3323,22 +3344,25 @@ document.addEventListener("DOMContentLoaded", function() {
     if (adminData.instagram) {
       applyInstagram(adminData.instagram);
     }
-    // Projects
-    if (adminData.projects) {
+    // Projects — the saved list decides HOW MANY projects exist, so slots added or
+    // deleted in the admin panel survive a reload instead of snapping back to the
+    // six hardcoded ones.
+    if (Array.isArray(adminData.projects)) {
+      if (projects.length > adminData.projects.length) projects.length = adminData.projects.length;
       adminData.projects.forEach((ap, i) => {
-        if (i < projects.length) {
-          projects[i].title      = ap.title      ?? projects[i].title;
-          projects[i].titleText  = ap.titleText  ?? (ap.title ? ap.title.replace(/<[^>]+>/g,'') : projects[i].titleText);
-          projects[i].titleEn    = ap.titleEn    ?? projects[i].titleEn;
-          projects[i].titlePt    = ap.titlePt    ?? projects[i].titlePt;
-          projects[i].tag        = ap.tag        ?? projects[i].tag;
-          projects[i].desc       = ap.desc       ?? projects[i].desc;
-          projects[i].descEn     = ap.descEn     ?? projects[i].descEn;
-          projects[i].descPt     = ap.descPt     ?? projects[i].descPt;
-          projects[i].descZh     = ap.descZh     ?? projects[i].descZh;
-          projects[i].images     = ap.images     ?? projects[i].images ?? [];
-          projects[i].comingSoon = (ap.comingSoon === true) ? true : false;
-        }
+        if (!projects[i]) projects[i] = blankProject(i);
+        projects[i].title      = ap.title      ?? projects[i].title;
+        projects[i].titleText  = ap.titleText  ?? (ap.title ? ap.title.replace(/<[^>]+>/g,'') : projects[i].titleText);
+        projects[i].titleEn    = ap.titleEn    ?? projects[i].titleEn;
+        projects[i].titlePt    = ap.titlePt    ?? projects[i].titlePt;
+        projects[i].tag        = ap.tag        ?? projects[i].tag;
+        projects[i].desc       = ap.desc       ?? projects[i].desc;
+        projects[i].descEn     = ap.descEn     ?? projects[i].descEn;
+        projects[i].descPt     = ap.descPt     ?? projects[i].descPt;
+        projects[i].descZh     = ap.descZh     ?? projects[i].descZh;
+        projects[i].images     = ap.images     ?? projects[i].images ?? [];
+        projects[i].comingSoon = (ap.comingSoon === true) ? true : false;
+        projects[i].hidden     = (ap.hidden     === true) ? true : false;
       });
     }
     // Re-render portfolio grid
@@ -3361,6 +3385,8 @@ document.addEventListener("DOMContentLoaded", function() {
       `<path d="M100 250 C20 180 10 80 100 10 C190 80 180 180 100 250Z" fill="#2e4a32"/><line x1="100" y1="10" x2="100" y2="250" stroke="#7a9e7e" stroke-width="2"/>`,
     ];
     projects.forEach((p, i) => {
+      // Not activated yet (or newly added) — draw no card at all on the public site.
+      if (p.hidden) return;
       const div = document.createElement('div');
       div.className = 'grid-item reveal';
       div.style.cursor = p.comingSoon ? 'default' : 'none';
@@ -3607,13 +3633,88 @@ document.addEventListener("DOMContentLoaded", function() {
     grid.innerHTML = '';
     projects.forEach((p, i) => {
       const card = document.createElement('div');
-      card.className = 'adm-project-card' + (p.comingSoon ? ' coming-soon' : '');
+      card.className = 'adm-project-card'
+        + (p.comingSoon ? ' coming-soon' : '')
+        + (p.hidden ? ' hidden-proj' : '');
+      const note = p.hidden
+        ? '<br><em style="font-size:0.7rem;color:var(--stone);">Oculto — no aparece en el sitio</em>'
+        : (p.comingSoon ? '<br><em style="font-size:0.7rem;color:var(--stone);">Próximamente</em>' : '');
       card.innerHTML = `
         <div class="adm-card-num">${String(i+1).padStart(2,'0')}</div>
-        <div class="adm-card-name">${p.titleText}${p.comingSoon ? '<br><em style="font-size:0.7rem;color:var(--stone);">Próximamente</em>' : ''}</div>
-        <button class="adm-card-edit" onclick="openProjectEditor(${i})">Editar</button>`;
+        <div class="adm-card-name">${p.titleText || '(sin título)'}${note}</div>
+        <button class="adm-card-edit" onclick="openProjectEditor(${i})">Editar</button>
+        <button class="adm-card-del" onclick="deleteProject(${i})">Eliminar</button>`;
       grid.appendChild(card);
     });
+  }
+
+  // A fresh, empty project slot. Hidden by default so adding one never puts a
+  // blank card on the live site before it has been filled in.
+  function blankProject(i) {
+    return {
+      tag: 'Ilustración',
+      title: `Proyecto ${i+1}`, titleText: `Proyecto ${i+1}`,
+      titleEn: '', titlePt: '',
+      desc: '', descEn: '', descPt: '', descZh: '',
+      images: [], count: 0,
+      comingSoon: false,
+      hidden: true,
+    };
+  }
+
+  // The persistable form of the live projects array. Always writes every project,
+  // so no slot loses its images when another one is saved.
+  function projectsForSave() {
+    return projects.map(p => ({
+      title:      p.title      ?? '',
+      titleText:  p.titleText  ?? '',
+      titleEn:    p.titleEn    ?? '',
+      titlePt:    p.titlePt    ?? '',
+      tag:        p.tag        ?? '',
+      desc:       p.desc       ?? '',
+      descEn:     p.descEn     ?? '',
+      descPt:     p.descPt     ?? '',
+      descZh:     p.descZh     ?? '',
+      comingSoon: p.comingSoon ?? false,
+      hidden:     p.hidden     ?? false,
+      images:     p.images     ?? [],
+    }));
+  }
+
+  async function addProject() {
+    projects.push(blankProject(projects.length));
+    if (!adminData) adminData = {};
+    adminData.projects = projectsForSave();
+    const ok = await saveAdminData();
+    if (ok === false) {
+      projects.pop();
+      alert('Error al guardar. Revisá tu conexión e intentá de nuevo.');
+      return;
+    }
+    renderGrid();
+    renderAdminProjectsGrid();
+    flashSaved('adm-proj-list-saved');
+    openProjectEditor(projects.length - 1);
+  }
+
+  async function deleteProject(i) {
+    const p = projects[i];
+    if (!p) return;
+    const name = p.titleText || `Proyecto ${i+1}`;
+    if (!confirm(`¿Eliminar "${name}"?\n\nSe quita del sitio y del panel. Las imágenes NO se borran del storage.`)) return;
+    const removed = projects.splice(i, 1)[0];
+    if (!adminData) adminData = {};
+    adminData.projects = projectsForSave();
+    const ok = await saveAdminData();
+    if (ok === false) {
+      projects.splice(i, 0, removed);
+      alert('Error al guardar. Revisá tu conexión e intentá de nuevo.');
+      return;
+    }
+    if (currentProject >= projects.length) currentProject = 0;
+    renderGrid();
+    renderAdminProjectsGrid();
+    flashSaved('adm-proj-list-saved');
   }
 
   function flashSaved(id) {
@@ -3823,6 +3924,7 @@ document.addEventListener("DOMContentLoaded", function() {
     document.getElementById('adm-proj-desc-pt').value = p.descPt || '';
     document.getElementById('adm-proj-desc-zh').value = p.descZh || '';
     document.getElementById('adm-proj-coming').checked = p.comingSoon || false;
+    document.getElementById('adm-proj-hidden').checked = p.hidden || false;
     // Illustrations
     renderIllusList(p.images || []);
     document.getElementById('adm-project-editor').classList.add('open');
@@ -4077,24 +4179,13 @@ document.addEventListener("DOMContentLoaded", function() {
     projects[i].descPt     = document.getElementById('adm-proj-desc-pt').value;
     projects[i].descZh     = document.getElementById('adm-proj-desc-zh').value;
     projects[i].comingSoon = document.getElementById('adm-proj-coming').checked;
+    projects[i].hidden     = document.getElementById('adm-proj-hidden').checked;
     projects[i].images     = images;
     projects[i].count      = images.length;
 
     // Persist — always rebuild the full projects array from live data so no project loses its images
     if (!adminData) adminData = {};
-    adminData.projects = projects.map(p => ({
-      title:      p.title      ?? '',
-      titleText:  p.titleText  ?? '',
-      titleEn:    p.titleEn    ?? '',
-      titlePt:    p.titlePt    ?? '',
-      tag:        p.tag        ?? '',
-      desc:       p.desc       ?? '',
-      descEn:     p.descEn     ?? '',
-      descPt:     p.descPt     ?? '',
-      descZh:     p.descZh     ?? '',
-      comingSoon: p.comingSoon ?? false,
-      images:     p.images     ?? [],
-    }));
+    adminData.projects = projectsForSave();
     const ok = await saveAdminData();
 
     // Update grid
@@ -4311,6 +4402,8 @@ document.addEventListener("DOMContentLoaded", function() {
   window.closePanel = closePanel;
   window.addIllusRow = addIllusRow;
   window.openProjectEditor = openProjectEditor;
+  window.addProject = addProject;
+  window.deleteProject = deleteProject;
   window.openProject = openProject;
   window.zoomNav = zoomNav;
   window.saveAbout = saveAbout;
