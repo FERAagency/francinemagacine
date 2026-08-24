@@ -3131,7 +3131,7 @@ document.addEventListener("DOMContentLoaded", function() {
       const filename = `blog_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       const res = await fetch('/api/upload', {
         method: 'POST',
-        headers: { 'x-filename': filename, 'Content-Type': file.type },
+        headers: await uploadHeaders({ 'x-filename': filename, 'Content-Type': file.type }),
         body: file
       });
       if (!res.ok) throw new Error();
@@ -3165,10 +3165,10 @@ document.addEventListener("DOMContentLoaded", function() {
     return url.startsWith(SUPABASE_IMG_BASE) ? '/img/' + url.slice(SUPABASE_IMG_BASE.length) : url;
   }
 
-  // SHA-256 of the default password — plain text never stored in source
-  const DEFAULT_PW_HASH = '70377138643d0202a812e157660761a559dc721db5eff1144d23a5b2aa4a0a3d';
-  // Password hash stays in localStorage — never synced to server (more secure)
-  const ADMIN_PW_HASH_KEY = 'fm_admin_pw_hash';
+  // Admin identity. NOT a secret: the password is stored and verified by
+  // Supabase Auth, server-side. Nothing in this file can unlock the panel.
+  const ADMIN_EMAIL = 'fedelu@proton.me';
+  const SESSION_KEY = 'fm_admin_session';
 
   // --- Rate limiting ---
   let loginAttempts = 0;
@@ -3179,16 +3179,70 @@ document.addEventListener("DOMContentLoaded", function() {
   let editingProjectIndex = -1;
   let adminData = null;
 
-  async function hashPassword(pw) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pw));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+  // --- Supabase Auth session ---
+  let authToken = null, authRefresh = null, authExpiry = 0;
+
+  function setSession(d) {
+    authToken = d.access_token;
+    authRefresh = d.refresh_token || null;
+    authExpiry = Date.now() + ((d.expires_in || 3600) * 1000);
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify({ refresh: authRefresh })); } catch(e) {}
   }
 
-  function getStoredPwHash() {
-    if (adminData && adminData.pwHash && /^[0-9a-f]{64}$/i.test(adminData.pwHash)) return adminData.pwHash;
-    const stored = localStorage.getItem(ADMIN_PW_HASH_KEY);
-    if (stored && /^[0-9a-f]{64}$/i.test(stored)) return stored;
-    return DEFAULT_PW_HASH;
+  function clearSession() {
+    authToken = null; authRefresh = null; authExpiry = 0;
+    try { localStorage.removeItem(SESSION_KEY); } catch(e) {}
+  }
+
+  // Throws on network failure so callers fail closed instead of falling through.
+  async function authSignIn(password) {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: 'POST',
+      headers: { 'apikey': SUPABASE_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: ADMIN_EMAIL, password })
+    });
+    if (!res.ok) return false;
+    const d = await res.json();
+    if (!d || !d.access_token) return false;
+    setSession(d);
+    return true;
+  }
+
+  async function authRefreshSession() {
+    if (!authRefresh) return false;
+    try {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+        method: 'POST',
+        headers: { 'apikey': SUPABASE_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: authRefresh })
+      });
+      if (!res.ok) { clearSession(); return false; }
+      const d = await res.json();
+      if (!d || !d.access_token) { clearSession(); return false; }
+      setSession(d);
+      return true;
+    } catch(e) { return false; }
+  }
+
+  // Valid access token, refreshed if within a minute of expiry. null = logged out.
+  async function getAuthToken() {
+    if (authToken && Date.now() < authExpiry - 60000) return authToken;
+    if (await authRefreshSession()) return authToken;
+    return null;
+  }
+
+  // Header block for the /api/upload calls.
+  async function uploadHeaders(extra) {
+    const t = await getAuthToken();
+    return Object.assign({ 'Authorization': `Bearer ${t || ''}` }, extra || {});
+  }
+
+  async function restoreSession() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch(e) {}
+    if (!saved || !saved.refresh) return false;
+    authRefresh = saved.refresh;
+    return await authRefreshSession();
   }
 
   // --- Supabase helpers ---
@@ -3204,11 +3258,13 @@ document.addEventListener("DOMContentLoaded", function() {
 
   async function dbSet(key, value) {
     try {
+      const token = await getAuthToken();
+      if (!token) { console.error('Supabase save failed: not signed in'); return false; }
       const res = await fetch(`${SUPABASE_URL}/rest/v1/site_data`, {
         method: 'POST',
         headers: {
           'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
           'Prefer': 'resolution=merge-duplicates'
         },
@@ -3392,8 +3448,14 @@ document.addEventListener("DOMContentLoaded", function() {
       return;
     }
     const pw = document.getElementById('admin-pw').value.trim();
-    const hash = await hashPassword(pw);
-    if (hash === getStoredPwHash()) {
+    let ok = false;
+    try {
+      ok = await authSignIn(pw);
+    } catch(e) {
+      err.textContent = lang === 'pt' ? 'Sem conexão. Tente de novo.' : lang === 'en' ? 'No connection. Try again.' : 'Sin conexión. Probá de nuevo.';
+      return;
+    }
+    if (ok) {
       loginAttempts = 0;
       adminLoggedIn = true;
       closeAdminLogin();
@@ -3416,6 +3478,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
   function adminLogout() {
     adminLoggedIn = false;
+    clearSession();
     document.getElementById('admin-bar').classList.remove('open');
     const _lp = document.getElementById('admin-panel');
     if (_lp) { _lp.classList.remove('open'); _lp.style.transform = ''; _lp.style.pointerEvents = ''; }
@@ -3614,7 +3677,7 @@ document.addEventListener("DOMContentLoaded", function() {
       const filename = `profile_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       const res = await fetch('/api/upload', {
         method: 'POST',
-        headers: { 'x-filename': filename, 'Content-Type': file.type },
+        headers: await uploadHeaders({ 'x-filename': filename, 'Content-Type': file.type }),
         body: file
       });
       if (!res.ok) throw new Error('Upload failed');
@@ -3658,7 +3721,7 @@ document.addEventListener("DOMContentLoaded", function() {
       const filename = `bg_${which}_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       const res = await fetch('/api/upload', {
         method: 'POST',
-        headers: { 'x-filename': filename, 'Content-Type': file.type },
+        headers: await uploadHeaders({ 'x-filename': filename, 'Content-Type': file.type }),
         body: file
       });
       if (!res.ok) throw new Error('Upload failed');
@@ -3727,11 +3790,20 @@ document.addEventListener("DOMContentLoaded", function() {
     if (!np) return;
     if (np !== cp) { alert(lang === 'pt' ? 'As senhas não coincidem.' : lang === 'en' ? 'Passwords do not match.' : 'Las contraseñas no coinciden.'); return; }
     if (np.length < 6) { alert(lang === 'pt' ? 'Mínimo 6 caracteres.' : lang === 'en' ? 'Minimum 6 characters.' : 'Mínimo 6 caracteres.'); return; }
-    const hash = await hashPassword(np);
-    localStorage.setItem(ADMIN_PW_HASH_KEY, hash);
-    if (!adminData) adminData = {};
-    adminData.pwHash = hash;
-    await saveAdminData();
+    const token = await getAuthToken();
+    if (!token) { alert(lang === 'pt' ? 'Sessão expirada. Entre de novo.' : lang === 'en' ? 'Session expired. Log in again.' : 'Sesión expirada. Ingresá de nuevo.'); return; }
+    let res;
+    try {
+      res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+        method: 'PUT',
+        headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: np })
+      });
+    } catch(e) { res = null; }
+    if (!res || !res.ok) {
+      alert(lang === 'pt' ? 'Não foi possível alterar a senha.' : lang === 'en' ? 'Could not change the password.' : 'No se pudo cambiar la contraseña.');
+      return;
+    }
     document.getElementById('adm-pw-new').value = '';
     document.getElementById('adm-pw-confirm').value = '';
     flashSaved('adm-pw-saved');
@@ -3864,7 +3936,7 @@ document.addEventListener("DOMContentLoaded", function() {
       const filename = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       const res = await fetch('/api/upload', {
         method: 'POST',
-        headers: { 'x-filename': filename, 'Content-Type': file.type },
+        headers: await uploadHeaders({ 'x-filename': filename, 'Content-Type': file.type }),
         body: file
       });
 
@@ -3944,7 +4016,7 @@ document.addEventListener("DOMContentLoaded", function() {
     try {
       const res = await fetch(
         `/api/upload?file=${encodeURIComponent(filename)}`,
-        { method: 'DELETE' }
+        { method: 'DELETE', headers: await uploadHeaders() }
       );
 
       if (!res.ok) {
@@ -4125,7 +4197,7 @@ document.addEventListener("DOMContentLoaded", function() {
       const filename = `ig_${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       const res = await fetch('/api/upload', {
         method: 'POST',
-        headers: { 'x-filename': filename, 'Content-Type': file.type },
+        headers: await uploadHeaders({ 'x-filename': filename, 'Content-Type': file.type }),
         body: file
       });
       if (!res.ok) throw new Error();
@@ -4171,7 +4243,14 @@ document.addEventListener("DOMContentLoaded", function() {
   // --- Init: load saved data from Supabase AFTER all functions are defined ---
   (async () => {
     adminData = await loadAdminData();
+    // Legacy field from the old client-side auth; dropped on the next save.
+    if (adminData && adminData.pwHash) delete adminData.pwHash;
     applyAdminData();
+    if (await restoreSession()) {
+      adminLoggedIn = true;
+      document.getElementById('admin-bar').classList.add('open');
+      document.body.style.paddingBottom = '52px';
+    }
   })();
 
   // --- Admin trigger: type "frankemily" on keyboard (desktop) ---
