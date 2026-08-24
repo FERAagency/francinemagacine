@@ -11,9 +11,9 @@ Portfolio site for illustrator Francina Pasarelli ("Francine Magacine"). Single-
 - `index.html` — the entire site (markup, CSS, JS)
 - `_redirects` — Netlify rule proxying `/img/*` to the Supabase storage bucket
 - `netlify/functions/upload.js` — serverless function handling image upload/delete
-- `deploy.zip` — what gets uploaded to Netlify; contains `index.html` + `_redirects` only
 - `images/` — local `illus1–10.png` originals (the site serves Supabase-hosted WebP versions)
-- `.claude/rebuild-zip.py` — hook script that regenerates `deploy.zip`
+- `deploy.zip` — **legacy** build output, git-ignored; no longer a deployment route
+- `.claude/rebuild-zip.py` — hook that still regenerates `deploy.zip`; a harmless leftover
 
 ## Architecture
 
@@ -36,7 +36,18 @@ The site uses Supabase REST API directly (no SDK). Credentials are in the script
 - `SUPABASE_URL` — the project URL
 - `SUPABASE_KEY` — the publishable anon key (safe to be in client code)
 
-The privileged service key is **not** in client code — it lives in Netlify environment variables and is only used by `netlify/functions/upload.js`.
+The privileged service key is **not** in client code — it lives in Netlify environment variables (`SUPABASE_SERVICE_KEY`) and is only used by `netlify/functions/upload.js`.
+
+**Row Level Security is on for `site_data`.** `anon` may **read only**; `authenticated` may read and write. Policies: `"Public can read"` (select, to anon + authenticated) and `"Admin can write all"` (for all, to authenticated).
+
+This means every admin save must carry the logged-in JWT — `dbSet()` does, `dbGet()` reads with the anon key. Writing with the anon key returns `403` / `42501 new row violates row-level security policy`. If admin saving ever breaks with that code, check `pg_policies` before changing any JS:
+
+```sql
+select policyname, cmd, roles, qual, with_check
+from pg_policies where schemaname='public' and tablename='site_data';
+```
+
+Note when probing RLS from outside: a blocked DELETE or UPDATE returns `204`/`200` with **zero rows affected**, not an error — only INSERT reports `42501`. Use `Prefer: return=representation` and check for an empty array.
 
 **Two Supabase tables:**
 - `site_data` — key/value store. Rows have `key` (string) and `value` (JSON string). Keys used: `admin_data` (hero text, about text/photo, project data, Instagram config) and `blog_posts` (array of post objects).
@@ -54,14 +65,17 @@ Translations are stored in a `translations` object keyed by `data-tid` attribute
 
 ## Admin system
 
-Accessed by typing a hidden keyword anywhere on the page (keyword is obfuscated in the script by joining string fragments). Password is hashed with SHA-256 via `crypto.subtle.digest` and stored only in `localStorage` — never sent to the server.
+Accessed by typing a hidden keyword anywhere on the page (keyword is obfuscated in the script by joining string fragments). Authentication is **Supabase Auth**: `POST /auth/v1/token?grant_type=password` for the user in the `ADMIN_EMAIL` constant. The access token is held in memory, the refresh token in `localStorage['fm_admin_session']`, so the session survives a reload. The password never leaves Supabase.
+
+The old client-side hash chain (`DEFAULT_PW_HASH`, `localStorage['fm_admin_pw_hash']`, `adminData.pwHash`) is **gone** — none of those identifiers exist any more. Reset the password from the admin panel or the Supabase dashboard, never in code.
 
 **Admin flow:** Login modal → Admin bar (bottom strip) → Admin panel (fullscreen editor) → Project editor modal (for individual projects).
 
 Content editable in the admin panel:
 - Hero description (all 4 languages)
 - About paragraphs (all 4 languages) + profile photo
-- Per-project: title, tag, description (all 4 languages), illustration images, coming-soon toggle
+- Per-project: title, tag, description (all 4 languages), illustration images, coming-soon toggle, hide-from-site toggle
+- Adding and deleting whole projects
 - Instagram handle + preview images (up to 8)
 - Blog posts (title, tag, date, cover, excerpt, body, draft toggle)
 - Admin password change
@@ -113,16 +127,50 @@ Key functions: `openLegal(kind)` where kind is `'privacy'` or `'terms'`, `closeL
 
 ## Projects data
 
-Six project slots are hardcoded in the `projects` array in the script. Each has: `title` (HTML string), `titleText` (plain text), `tag`, `desc` (Spanish), `descEn`, `descPt`, `descZh`, `images` (array of URLs), `comingSoon`. The admin panel can override all fields; slots 5 and 6 start as "coming soon" (`Próximamente`).
+The `projects` array in the script ships six starting slots, but **the list grows and shrinks from the admin panel** — "+ Agregar proyecto" appends, per-card "Eliminar" removes.
+
+All six original slots hold **real projects** with images. The hardcoded `Próximamente` entries for slots 5 and 6 are only fallbacks that saved data fully overrides — do not treat them as placeholders.
+
+Each project has: `title` (HTML string), `titleText` (plain text), `titleEn`, `titlePt`, `tag`, `desc` (Spanish), `descEn`, `descPt`, `descZh`, `images` (array of URLs), `count`, `comingSoon`, `hidden`.
+
+**Three visibility states:**
+- normal — clickable card
+- `comingSoon: true` — dimmed "Próximamente" teaser card
+- `hidden: true` — **no element rendered at all**; `renderGrid()` early-returns
+
+`hidden` is the activation gate. `blankProject()` sets it `true`, so a newly added slot never appears as a blank card on the live site before it has been filled in.
+
+**Critical:** `applyAdminData()` treats `adminData.projects` as **authoritative for length**, truncating or growing the live array to match. Without that, an added slot saves and then vanishes on reload. Preserve this or add/delete silently stops persisting.
+
+`projectsForSave()` is the single serializer, used by `saveProject`, `addProject`, and `deleteProject`, so no slot loses its images when another is saved.
+
+Deleting a project does **not** remove its images from storage — deliberate; orphaned files accumulate.
 
 ## Deployment
 
-No build step. Deployment is a `deploy.zip` upload in the Netlify UI.
+No build step and no zip upload. The site is **repo-connected**: Netlify builds from `FERAagency/francinemagacine` on every push to `main`, publishing in roughly 15–30 seconds. **Deploying is `git push`.**
 
-`deploy.zip` is rebuilt automatically by a `PostToolUse` hook (`.claude/settings.local.json` → `.claude/rebuild-zip.py`) after every edit to `index.html`. **The hook only loads when the session starts from inside this directory** — if launched from a parent dir, the zip goes stale silently. Rebuild manually with:
+`netlify/functions/upload.js` deploys from git along with everything else.
+
+**Required Netlify environment variables** — Project configuration → Environment variables. Without them `/api/upload` returns `500 Server misconfigured`:
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_KEY` — the Supabase `service_role` key; mark it secret, never commit it
+
+Names are case-sensitive and must match `process.env` exactly. **Env var changes only reach the function after a fresh deploy** — setting them alone does nothing, which is the single most time-wasting trap here. The config page's "Last update at H:MM" line is the tell: if it predates the variables, the running function has not seen them.
+
+Health probe, no auth required:
 
 ```
-printf '{"tool_input":{"file_path":"/home/emi/Projects/Francine/index.html"}}' | python3 .claude/rebuild-zip.py
+curl -s -w "\n%{http_code}\n" -X POST https://francinemagacine.netlify.app/api/upload
 ```
 
-Note that the zip contains only `index.html` and `_redirects` — it does **not** include `netlify/functions/upload.js`. The function has to reach Netlify by some other route for admin image uploads to work in production.
+- `401 Unauthorized` — healthy; the function reached its auth gate
+- `500 Server misconfigured` — a variable is missing, or the build predates it
+- `404` — the function stopped deploying
+
+Sending a bogus bearer token and still getting `401` (rather than `500`) additionally proves `SUPABASE_URL` is reachable and the service key authenticates.
+
+Netlify UI notes: "All scopes" is the free option — "Specific scopes" is the paid one. If the variable form is stuck on "Different value for each deploy context", filling **Production** alone is enough for the live site; leave **Local development (Netlify CLI)** empty for secrets, since Netlify states that field is not treated as secret. `Site is live` is the **final** line of a successful deploy log, not a hang.
+
+`deploy.zip` is legacy build output, git-ignored, and no longer a deployment route. A `PostToolUse` hook (`.claude/settings.local.json` → `.claude/rebuild-zip.py`) still regenerates it after `Edit`/`Write` edits to `index.html`; that is harmless. **Never treat a stale zip as a deployment problem, and never tell the user to upload one.**
